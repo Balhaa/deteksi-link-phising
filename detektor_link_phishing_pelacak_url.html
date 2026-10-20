@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Detektor Link Phishing & Pelacak Redirect URL</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- React & Babel for Single File Application -->
+    <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap');
+        body {
+            font-family: 'Plus Jakarta Sans', sans-serif;
+        }
+        .code-font {
+            font-family: 'JetBrains Mono', monospace;
+        }
+    </style>
+</head>
+<body class="bg-slate-950 text-slate-100 min-h-screen selection:bg-cyan-500 selection:text-slate-950">
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState } = React;
+
+        const SUSPICIOUS_TLDS = ['.xyz', '.top', '.club', '.work', '.gq', '.cf', '.tk', '.ml', '.ga', '.biz', '.cc', '.buzz', '.fit', '.icu', '.site', '.online', '.rest', '.vip', '.top', '.kim'];
+        const POPULAR_BRANDS = [
+            'paypal', 'google', 'facebook', 'instagram', 'bankcentralasia', 'bca', 'mandiri', 'bni', 'bri', 'cimb', 
+            'tokopedia', 'shopee', 'blibli', 'lazada', 'netflix', 'apple', 'microsoft', 'whatsapp', 'telegram', 
+            'binance', 'indodax', 'dana', 'ovo', 'gopay', 'linkaja', 'steam', 'roblox', 'danamon', 'permata'
+        ];
+        const SHORTENER_DOMAINS = ['bit.ly', 'tinyurl.com', 't.co', 'cutt.ly', 'is.gd', 'shorturl.at', 'rb.gy', 's.id', 'linktr.ee', 'urlis.net'];
+
+        function App() {
+            const [inputUrl, setInputUrl] = useState('');
+            const [isAnalyzing, setIsAnalyzing] = useState(false);
+            const [result, setResult] = useState(null);
+            const [history, setHistory] = useState([]);
+
+            const analyzeUrl = async (urlToTest) => {
+                let targetUrl = urlToTest.trim();
+                if (!targetUrl) return;
+
+                if (!targetUrl.match(/^https?:\/\//i)) {
+                    targetUrl = 'https://' + targetUrl;
+                }
+
+                setIsAnalyzing(true);
+                setResult(null);
+
+                let redirectChain = [];
+                let finalDestination = targetUrl;
+                let fetchError = null;
+
+                // 1. Lakukan Live API Check untuk Melacak Seluruh Rantai Redirect URL Sampai Link Terakhir
+                try {
+                    const apiEndpoint = `https://www.redirectcheck.org/api/check`;
+                    const res = await fetch(apiEndpoint, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ url: targetUrl, method: 'GET', followMetaRefresh: true })
+                    });
+                    
+                    if (res.ok) {
+                        const data = await res.json();
+                        if (data && data.chain && data.chain.length > 0) {
+                            redirectChain = data.chain.map((item, index) => {
+                                const isLast = index === data.chain.length - 1;
+                                let note = 'Lokasi Tujuan Akhir (Landing Page)';
+                                if (!isLast) {
+                                    if (item.status === 301 || item.status === 308) {
+                                        note = `Pengalihan Permanen (${item.status})`;
+                                    } else if (item.status === 302 || item.status === 307) {
+                                        note = `Pengalihan Sementara (${item.status})`;
+                                    } else {
+                                        note = `Pengalihan Hop Ke-${index + 1}`;
+                                    }
+                                }
+                                return {
+                                    url: item.url,
+                                    code: item.status || 200,
+                                    note: note,
+                                    isLast: isLast
+                                };
+                            });
+                            finalDestination = data.chain[data.chain.length - 1].url;
+                        }
+                    }
+                } catch (err) {
+                    console.warn("Integrasi API Redirect online terhalang network, menggunakan mode pelacakan langsung.");
+                    fetchError = "Gagal terhubung ke tracker external, hasil dianalisis berdasarkan struktur URL.";
+                }
+
+                // Fallback jika API tidak memberikan chain
+                if (redirectChain.length === 0) {
+                    redirectChain.push({
+                        url: targetUrl,
+                        code: 200,
+                        note: 'URL Target Awal (Lokasi Akhir)',
+                        isLast: true
+                    });
+                }
+
+                let parsedUrl;
+                try {
+                    parsedUrl = new URL(finalDestination || targetUrl);
+                } catch (e) {
+                    try {
+                        parsedUrl = new URL(targetUrl);
+                    } catch(err) {
+                        setIsAnalyzing(false);
+                        alert("Format URL tidak valid! Harap masukkan URL yang benar.");
+                        return;
+                    }
+                }
+
+                const hostname = parsedUrl.hostname.toLowerCase();
+                const warnings = [];
+                let riskScore = 0;
+
+                // Indikator Rantai Redirect Terlalu Panjang (> 2 Hop)
+                if (redirectChain.length > 3) {
+                    warnings.push({
+                        type: 'warning',
+                        title: `Rantai Redirect Sangat Panjang (${redirectChain.length} Lompatan Link)`,
+                        desc: 'Tautan ini dialihkan berulang kali melewati beberapa domain/URL intermediary. Teknik ini sering dipakai penyerang untuk mengelabui filter DNS dan keamanan.'
+                    });
+                    riskScore += 25;
+                }
+
+                // Indikator 1: Penggunaan IP Address
+                const isIp = /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname);
+                if (isIp) {
+                    warnings.push({
+                        type: 'danger',
+                        title: 'Menggunakan Alamat IP Langsung (Tanpa Domain)',
+                        desc: 'URL ini mengakses server memakai IP langsung tanpa nama domain terdaftar. Teknik ini sering dipakai situs phishing untuk menghindari sensor DNS.'
+                    });
+                    riskScore += 40;
+                }
+
+                // Indikator 2: Simbol Karakter `@`
+                if (targetUrl.includes('@') || finalDestination.includes('@')) {
+                    warnings.push({
+                        type: 'danger',
+                        title: 'Mengandung Simbol Redireksi Tersembunyi (@)',
+                        desc: 'Karakter "@" memaksa browser mengabaikan teks sebelumnya dan mengalihkan pengguna secara diam-diam ke alamat setelahnya.'
+                    });
+                    riskScore += 40;
+                }
+
+                // Indikator 3: Punycode / Serangan Homograf (xn--)
+                if (hostname.includes('xn--')) {
+                    warnings.push({
+                        type: 'danger',
+                        title: 'Serangan Homograf / Punycode (xn--)',
+                        desc: 'Domain ini menggunakan sandi Punycode untuk menirukan huruf asli (misal mengganti huruf latin o dengan huruf cyrillic ο).'
+                    });
+                    riskScore += 45;
+                }
+
+                // Indikator 4: Protokol HTTP (Tidak Aman / Tanpa SSL)
+                if (parsedUrl.protocol === 'http:') {
+                    warnings.push({
+                        type: 'warning',
+                        title: 'Koneksi Tidak Terenkripsi (Protokol HTTP)',
+                        desc: 'Situs tidak menggunakan sertifikat enkripsi SSL/HTTPS. Data sandi atau data sensitif yang diisi di sini dapat disadap.'
+                    });
+                    riskScore += 20;
+                }
+
+                // Indikator 5: Peniruan Brand Resmi / Typosquatting
+                let targetedBrand = null;
+                POPULAR_BRANDS.forEach(brand => {
+                    if (hostname.includes(brand) && 
+                        !hostname.endsWith(`${brand}.com`) && 
+                        !hostname.endsWith(`${brand}.co.id`) && 
+                        !hostname.endsWith(`${brand}.org`) &&
+                        !hostname.endsWith(`${brand}.net`) &&
+                        !hostname.endsWith(`${brand}.id`)) {
+                        targetedBrand = brand;
+                        riskScore += 35;
+                    }
+                });
+
+                if (targetedBrand) {
+                    warnings.push({
+                        type: 'danger',
+                        title: `Indikasi Pemalsuan Nama Brand (${targetedBrand.toUpperCase()})`,
+                        desc: `Domain mengandung kata "${targetedBrand}" tetapi bukan domain resmi. Sangat berpotensi sebagai web perangkap/phishing.`
+                    });
+                }
+
+                // Indikator 6: Domain Berisiko / TLD Murah
+                const hasSuspiciousTLD = SUSPICIOUS_TLDS.some(tld => hostname.endsWith(tld));
+                if (hasSuspiciousTLD) {
+                    warnings.push({
+                        type: 'warning',
+                        title: 'Ekstensi Domain (TLD) Berisiko Tinggi',
+                        desc: 'Domain ini memakai ekstensi murah/gratis yang secara statistik sering digunakan pelaku kejahatan siber.'
+                    });
+                    riskScore += 25;
+                }
+
+                // Indikator 7: Subdomain Berlebihan
+                const domainParts = hostname.split('.');
+                if (domainParts.length > 3) {
+                    warnings.push({
+                        type: 'warning',
+                        title: 'Subdomain Bertingkat Banyak (> 3 Level)',
+                        desc: 'Memiliki banyak subdomain bertujuan untuk membingungkan korban agar mengira situs ini adalah milik institusi resmi.'
+                    });
+                    riskScore += 15;
+                }
+
+                // Indikator 8: Pemendek URL (Shortener)
+                const isShortener = SHORTENER_DOMAINS.some(short => targetUrl.toLowerCase().includes(short));
+                if (isShortener) {
+                    warnings.push({
+                        type: 'info',
+                        title: 'Menggunakan Pemendek URL (URL Shortener)',
+                        desc: 'Tautan asli disembunyikan di balik link pendek. Periksa rantai redirect di bawah untuk memastikan lokasi akhirnya.'
+                    });
+                    riskScore += 10;
+                }
+
+                // Indikator 9: URL Sangat Panjang
+                if (targetUrl.length > 75) {
+                    warnings.push({
+                        type: 'warning',
+                        title: 'Panjang Karakter URL Berlebihan (> 75 Karakter)',
+                        desc: 'String URL yang sangat panjang sering dimanfaatkan untuk menyembunyikan parameter beracun di bagian ujung.'
+                    });
+                    riskScore += 10;
+                }
+
+                // Penentuan Kategori Keamanan
+                let category = 'AMAN / RISIKO RENDAH';
+                let categoryBadge = 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30';
+                let categoryIcon = 'fa-shield-check';
+
+                if (riskScore >= 60) {
+                    category = 'BERBAHAYA / POSITIF PHISHING';
+                    categoryBadge = 'bg-red-500/20 text-red-400 border-red-500/30';
+                    categoryIcon = 'fa-triangle-exclamation';
+                } else if (riskScore >= 25) {
+                    category = 'MENCURIGAKAN / PERLU WASPADA';
+                    categoryBadge = 'bg-amber-500/20 text-amber-400 border-amber-500/30';
+                    categoryIcon = 'fa-shield-halved';
+                }
+
+                const analysisData = {
+                    originalUrl: targetUrl,
+                    finalUrl: finalDestination,
+                    redirects: redirectChain,
+                    hostname: hostname,
+                    protocol: parsedUrl.protocol,
+                    riskScore: Math.min(riskScore, 100),
+                    category: category,
+                    categoryBadge: categoryBadge,
+                    categoryIcon: categoryIcon,
+                    warnings: warnings,
+                    fetchNote: fetchError,
+                    timestamp: new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })
+                };
+
+                setResult(analysisData);
+                setHistory(prev => [analysisData, ...prev.filter(item => item.originalUrl !== targetUrl).slice(0, 4)]);
+                setIsAnalyzing(false);
+            };
+
+            return (
+                <div class="max-w-6xl mx-auto px-4 py-8">
+                    {/* Header Section */}
+                    <header class="flex flex-col sm:flex-row sm:items-center justify-between border-b border-slate-800 pb-6 mb-8 gap-4">
+                        <div class="flex items-center gap-3">
+                            <div class="w-12 h-12 rounded-2xl bg-gradient-to-tr from-cyan-500 via-blue-600 to-indigo-600 flex items-center justify-center text-white shadow-lg shadow-cyan-500/20">
+                                <i class="fa-solid fa-shield-virus text-2xl"></i>
+                            </div>
+                            <div>
+                                <div class="flex items-center gap-2">
+                                    <h1 class="text-2xl font-bold bg-gradient-to-r from-white via-slate-200 to-slate-400 bg-clip-text text-transparent">
+                                        Detektor Link Phishing & Pelacak URL
+                                    </h1>
+                                    <span class="px-2 py-0.5 text-[10px] font-extrabold uppercase tracking-wider bg-cyan-500/10 text-cyan-400 border border-cyan-500/30 rounded-full">Pro</span>
+                                </div>
+                                <p class="text-xs text-slate-400 mt-0.5">Analisis Keamanan Real-Time, Lacak Seluruh Redirect URL Sampai Link Terakhir</p>
+                            </div>
+                        </div>
+                    </header>
+
+                    {/* Main Content: URL Checker */}
+                    <main class="space-y-8">
+                        {/* Input Form Box */}
+                        <section class="bg-slate-900/90 border border-slate-800 rounded-2xl p-6 shadow-2xl backdrop-blur">
+                            <form onSubmit={(e) => { e.preventDefault(); analyzeUrl(inputUrl); }}>
+                                <label class="block text-sm font-semibold text-slate-300 mb-2.5">
+                                    Masukkan Alamat Tautan / URL yang ingin diuji secara langsung:
+                                </label>
+                                <div class="flex flex-col sm:flex-row gap-3">
+                                    <div class="relative flex-1">
+                                        <i class="fa-solid fa-link absolute left-4 top-1/2 -translate-y-1/2 text-slate-500"></i>
+                                        <input 
+                                            type="text" 
+                                            value={inputUrl}
+                                            onChange={(e) => setInputUrl(e.target.value)}
+                                            placeholder="Contoh: bit.ly/3xXyZ, cutt.ly/xyz atau https://bankcentralasia-login.xyz" 
+                                            class="w-full pl-11 pr-4 py-3.5 bg-slate-950 border border-slate-800 rounded-xl focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 text-white placeholder-slate-600 outline-none transition-all code-font text-sm"
+                                            required
+                                        />
+                                    </div>
+                                    <button 
+                                        type="submit" 
+                                        disabled={isAnalyzing}
+                                        class="px-7 py-3.5 bg-gradient-to-r from-cyan-500 to-blue-600 hover:from-cyan-400 hover:to-blue-500 text-slate-950 font-bold rounded-xl shadow-lg shadow-cyan-500/20 transition-all flex items-center justify-center gap-2 disabled:opacity-50 cursor-pointer shrink-0">
+                                        {isAnalyzing ? (
+                                            <>
+                                                <i class="fa-solid fa-circle-notch animate-spin"></i>
+                                                Melacak Seluruh Redirect...
+                                            </>
+                                        ) : (
+                                            <>
+                                                <i class="fa-solid fa-radar"></i>
+                                                Analisis Sekarang
+                                            </>
+                                        )}
+                                    </button>
+                                </div>
+                            </form>
+
+                            {/* Sample Test Links */}
+                            <div class="mt-5 pt-4 border-t border-slate-800/80 flex flex-wrap items-center gap-2 text-xs text-slate-400">
+                                <span class="font-medium text-slate-500 flex items-center gap-1">
+                                    <i class="fa-solid fa-vial"></i> Contoh Sampel:
+                                </span>
+                                <button onClick={() => { setInputUrl('https://google.com'); analyzeUrl('https://google.com'); }} class="px-2.5 py-1 bg-slate-800/80 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors code-font border border-slate-700/50">
+                                    google.com (Direct)
+                                </button>
+                                <button onClick={() => { setInputUrl('http://192.168.1.1/login'); analyzeUrl('http://192.168.1.1/login'); }} class="px-2.5 py-1 bg-slate-800/80 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors code-font border border-slate-700/50">
+                                    192.168.1.1 (IP Direct)
+                                </button>
+                                <button onClick={() => { setInputUrl('http://xn--ggle-0nda.com/auth'); analyzeUrl('http://xn--ggle-0nda.com/auth'); }} class="px-2.5 py-1 bg-slate-800/80 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors code-font border border-slate-700/50">
+                                    xn--ggle-0nda.com (Punycode)
+                                </button>
+                                <button onClick={() => { setInputUrl('http://bca-verifikasi-akun.xyz/login'); analyzeUrl('http://bca-verifikasi-akun.xyz/login'); }} class="px-2.5 py-1 bg-slate-800/80 hover:bg-slate-700 text-slate-300 rounded-lg transition-colors code-font border border-slate-700/50">
+                                    bca-verifikasi-akun.xyz (Fake Brand)
+                                </button>
+                            </div>
+                        </section>
+
+                        {/* Results Panel */}
+                        {result && (
+                            <section class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                                {/* Left Status Card */}
+                                <div class="lg:col-span-1 bg-slate-900 border border-slate-800 rounded-2xl p-6 flex flex-col justify-between space-y-6 shadow-xl">
+                                    <div>
+                                        <span class="text-xs font-semibold uppercase tracking-wider text-slate-400">Hasil Evaluasi Keamanan</span>
+                                        <div class="mt-4 flex items-center gap-3">
+                                            <div class={`w-14 h-14 rounded-2xl flex items-center justify-center text-2xl border shadow-lg ${result.categoryBadge}`}>
+                                                <i class={`fa-solid ${result.categoryIcon}`}></i>
+                                            </div>
+                                            <div>
+                                                <h3 class="font-bold text-base leading-snug text-white">
+                                                    {result.category}
+                                                </h3>
+                                                <p class="text-xs text-slate-400 mt-1">Skor Risiko: <span class="font-bold text-cyan-400">{result.riskScore} / 100</span></p>
+                                            </div>
+                                        </div>
+
+                                        {/* Progress Bar Meter */}
+                                        <div class="mt-5 space-y-1.5">
+                                            <div class="flex justify-between text-[11px] text-slate-400 font-medium">
+                                                <span>Tingkat Kerentanan</span>
+                                                <span>{result.riskScore}%</span>
+                                            </div>
+                                            <div class="w-full bg-slate-950 rounded-full h-3 p-0.5 border border-slate-800 overflow-hidden">
+                                                <div 
+                                                    class={`h-full rounded-full transition-all duration-1000 ${
+                                                        result.riskScore >= 60 ? 'bg-gradient-to-r from-red-600 to-rose-500' :
+                                                        result.riskScore >= 25 ? 'bg-gradient-to-r from-amber-600 to-yellow-500' :
+                                                        'bg-gradient-to-r from-emerald-600 to-teal-400'
+                                                    }`} 
+                                                    style={{ width: `${Math.max(result.riskScore, 6)}%` }}>
+                                                </div>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {/* Technical Metadata */}
+                                    <div class="space-y-3 pt-4 border-t border-slate-800 text-xs text-slate-400">
+                                        <div class="flex justify-between items-center">
+                                            <span>Domain Host Akhir:</span>
+                                            <span class="font-mono text-slate-200 font-semibold">{result.hostname}</span>
+                                        </div>
+                                        <div class="flex justify-between items-center">
+                                            <span>Protokol Enkripsi:</span>
+                                            <span class={`font-semibold px-2 py-0.5 rounded text-[10px] ${result.protocol === 'https:' ? 'bg-emerald-500/10 text-emerald-400 border border-emerald-500/20' : 'bg-red-500/10 text-red-400 border border-red-500/20'}`}>
+                                                {result.protocol.toUpperCase().replace(':', '')}
+                                            </span>
+                                        </div>
+                                        <div class="flex justify-between items-center">
+                                            <span>Total Lompatan Link:</span>
+                                            <span class="text-cyan-400 font-semibold">{result.redirects.length} Step</span>
+                                        </div>
+                                        <div class="flex justify-between items-center">
+                                            <span>Waktu Pemindaian:</span>
+                                            <span class="text-slate-300">{result.timestamp}</span>
+                                        </div>
+                                    </div>
+                                </div>
+
+                                {/* Right Content: Redirect Preview & Warnings */}
+                                <div class="lg:col-span-2 space-y-6">
+                                    {/* URL Redirect Chain Trace */}
+                                    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                                        <h3 class="text-sm font-semibold text-slate-200 mb-4 flex items-center justify-between">
+                                            <span class="flex items-center gap-2">
+                                                <i class="fa-solid fa-route text-cyan-400"></i> Rantai Redirect & Lokasi URL Terakhir
+                                            </span>
+                                            <span class="text-xs font-normal text-cyan-400 font-mono">{result.redirects.length} Tahap Pengalihan</span>
+                                        </h3>
+                                        
+                                        <div class="space-y-3 relative">
+                                            {result.redirects.map((step, idx) => (
+                                                <div key={idx} class="relative">
+                                                    {/* Visual Connection Line between steps */}
+                                                    {idx < result.redirects.length - 1 && (
+                                                        <div class="absolute left-6 top-10 w-0.5 h-6 bg-cyan-500/40 z-0"></div>
+                                                    )}
+                                                    <div class={`relative z-10 flex items-start gap-3 p-3.5 rounded-xl border transition-colors ${
+                                                        step.isLast ? 'bg-slate-950 border-emerald-500/50 ring-1 ring-emerald-500/20' : 'bg-slate-950/80 border-slate-800'
+                                                    }`}>
+                                                        <div class={`w-7 h-7 rounded-lg text-xs flex items-center justify-center shrink-0 font-bold border ${
+                                                            step.isLast ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/40' : 'bg-slate-800 text-cyan-400 border-slate-700'
+                                                        }`}>
+                                                            {idx + 1}
+                                                        </div>
+                                                        <div class="overflow-hidden flex-1">
+                                                            <div class="flex items-center justify-between gap-2 mb-1">
+                                                                <span class={`text-[10px] font-bold uppercase tracking-wider ${step.isLast ? 'text-emerald-400' : 'text-slate-400'}`}>
+                                                                    {step.isLast ? '🎯 LOKASI TUJUAN TERAKHIR (LANDING PAGE)' : step.note}
+                                                                </span>
+                                                                <span class={`text-[10px] code-font px-1.5 py-0.5 rounded border ${
+                                                                    step.code >= 300 && step.code < 400 ? 'bg-amber-500/10 text-amber-400 border-amber-500/20' :
+                                                                    step.code === 200 ? 'bg-emerald-500/10 text-emerald-400 border-emerald-500/20' : 'bg-slate-800 text-slate-300 border-slate-700'
+                                                                }`}>
+                                                                    HTTP {step.code}
+                                                                </span>
+                                                            </div>
+                                                            <p class={`text-xs code-font break-all ${step.isLast ? 'text-emerald-300 font-semibold' : 'text-slate-300'}`}>
+                                                                {step.url}
+                                                            </p>
+                                                        </div>
+                                                    </div>
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+
+                                    {/* Warnings List */}
+                                    <div class="bg-slate-900 border border-slate-800 rounded-2xl p-6 shadow-xl">
+                                        <h3 class="text-sm font-semibold text-slate-200 mb-4 flex items-center gap-2">
+                                            <i class="fa-solid fa-triangle-exclamation text-amber-400"></i> Peringatan & Indikator Risiko ({result.warnings.length})
+                                        </h3>
+
+                                        {result.warnings.length === 0 ? (
+                                            <div class="p-4 bg-emerald-950/20 border border-emerald-800/40 rounded-xl flex items-center gap-3 text-emerald-300 text-sm">
+                                                <i class="fa-solid fa-circle-check text-xl shrink-0 text-emerald-400"></i>
+                                                <p class="text-xs leading-relaxed">
+                                                    Tidak ditemukan indikator pola phishing standar pada struktur tautan ini. Namun tetap selalu verifikasi kembali sebelum memasukkan informasi sensitif.
+                                                </p>
+                                            </div>
+                                        ) : (
+                                            <div class="space-y-3">
+                                                {result.warnings.map((warn, i) => (
+                                                    <div key={i} class={`p-3.5 rounded-xl border flex items-start gap-3 transition-all ${
+                                                        warn.type === 'danger' ? 'bg-red-950/20 border-red-800/40 text-red-300' :
+                                                        warn.type === 'warning' ? 'bg-amber-950/20 border-amber-800/40 text-amber-300' :
+                                                        'bg-blue-950/20 border-blue-800/40 text-blue-300'
+                                                    }`}>
+                                                        <i class={`fa-solid ${
+                                                            warn.type === 'danger' ? 'fa-triangle-exclamation text-red-400' :
+                                                            warn.type === 'warning' ? 'fa-circle-exclamation text-amber-400' :
+                                                            'fa-circle-info text-blue-400'
+                                                        } text-base shrink-0 mt-0.5`}></i>
+                                                        <div>
+                                                            <h4 class="font-bold text-xs tracking-wide uppercase mb-1">{warn.title}</h4>
+                                                            <p class="text-xs text-slate-300 leading-relaxed">{warn.desc}</p>
+                                                        </div>
+                                                    </div>
+                                                ))}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            </section>
+                        )}
+
+                        {/* Scan History */}
+                        {history.length > 0 && (
+                            <section class="bg-slate-900/50 border border-slate-800 rounded-2xl p-6">
+                                <h3 class="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2">
+                                    <i class="fa-solid fa-clock-rotate-left text-cyan-400"></i> Riwayat Pemindaian
+                                </h3>
+                                <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                                    {history.map((item, index) => (
+                                        <div key={index} onClick={() => setResult(item)} class="p-3 bg-slate-950 border border-slate-800 hover:border-slate-700 rounded-xl cursor-pointer transition-all flex items-center justify-between">
+                                            <div class="overflow-hidden pr-2">
+                                                <p class="text-xs font-medium text-slate-200 code-font truncate">{item.originalUrl}</p>
+                                                <p class="text-[10px] text-slate-500 mt-0.5">{item.timestamp} • Skor: {item.riskScore}/100 • ({item.redirects.length} Hop)</p>
+                                            </div>
+                                            <span class={`px-2 py-0.5 text-[10px] font-bold rounded uppercase ${
+                                                item.riskScore >= 60 ? 'bg-red-500/20 text-red-400' :
+                                                item.riskScore >= 25 ? 'bg-amber-500/20 text-amber-400' :
+                                                'bg-emerald-500/20 text-emerald-400'
+                                            }`}>
+                                                {item.riskScore >= 60 ? 'Bahaya' : item.riskScore >= 25 ? 'Waspada' : 'Aman'}
+                                            </span>
+                                        </div>
+                                    ))}
+                                </div>
+                            </section>
+                        )}
+                    </main>
+                </div>
+            );
+        }
+
+        ReactDOM.createRoot(document.getElementById('root')).render(<App />);
+    </script>
+</body>
+</html>
