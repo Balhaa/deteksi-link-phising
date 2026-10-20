@@ -13,6 +13,12 @@ Aplikasi web satu halaman untuk memeriksa indikator risiko pada URL dan melihat 
 
 Buka [`detektor_link_phishing_pelacak_url.html`](./detektor_link_phishing_pelacak_url.html) di browser. Koneksi internet diperlukan untuk memuat React, Tailwind CSS, Font Awesome, Google Fonts, dan layanan Redirect Check dari CDN atau layanan eksternal.
 
+## Deploy ke GitHub Pages
+
+Workflow GitHub Actions menyalin file HTML aplikasi menjadi `index.html` dan menerbitkannya sebagai halaman utama situs setiap kali ada push ke branch `main`. README ini tidak diterbitkan sebagai halaman aplikasi.
+
+URL situs: https://balhaa.github.io/deteksi-link-phising/
+
 ## Privasi dan batasan
 
 URL yang diperiksa dikirim ke `redirectcheck.org` untuk memperoleh informasi redirect. Jangan masukkan URL yang memuat token, kata sandi, atau informasi privat. Analisis menggunakan indikator sederhana dan bukan jaminan bahwa suatu tautan aman atau berbahaya; selalu verifikasi tautan melalui sumber tepercaya.
